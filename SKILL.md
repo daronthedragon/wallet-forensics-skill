@@ -13,7 +13,7 @@ Trigger on requests like:
 
 - "Analyze this wallet: 0x…" / "What's in this address?"
 - "How much have I spent on gas?"
-- "Have I been sandwiched?" / "How much have I lost to MEV?"
+- "Have I been sandwiched?" / "How much have I lost to MEV?" (EVM chains)
 - "Are any of my approvals dangerous?" / "What should I revoke?"
 - "Can I actually sell this token?" / "Is this position liquid?"
 - "What's my PnL on this wallet?"
@@ -76,6 +76,8 @@ The JSON has this shape:
 **Approvals** are ranked `critical` / `high` / `medium` / `low` by what could be taken **right now** — the smaller of the allowance and the current balance. An unlimited approval on an empty wallet is not urgent; the same approval on their main bag is.
 
 **MEV events** carry a `confidence` field of `high` / `medium` / `low`. Report it. A `low`-confidence sandwich is a maybe, not a fact.
+
+Sandwich detection is **EVM-only** and reads full blocks, which public RPCs often refuse. If `warnings` says blocks could not be read, an empty MEV list means *not checked*, not *not sandwiched* — never report the latter.
 
 ## Interpreting responsibly
 

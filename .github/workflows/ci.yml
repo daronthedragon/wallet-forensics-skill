@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Syntax check the analyzer
+        run: node --check scripts/forensics.mjs
+
+      # The whole point of this skill is that it runs with no install step.
+      # Fail loudly if a dependency ever sneaks in.
+      - name: Assert zero dependencies
+        run: |
+          if [ -f package.json ]; then
+            echo "package.json present — this skill is meant to be dependency-free"
+            exit 1
+          fi
+          if grep -rEn "^\s*(import|const .*=\s*require)\s*.*(from\s+)?['\"][^./]" scripts/*.mjs; then
+            echo "external module import found in scripts/"
+            exit 1
+          fi
+          echo "no external imports"
+
+      - name: CLI contract
+        run: |
+          node scripts/forensics.mjs --help | grep -q "wallet-forensics"
+          node scripts/forensics.mjs --help | grep -q -- "--all-evm"
+
+      - name: Rejects malformed input
+        run: |
+          if node scripts/forensics.mjs notanaddress 2>/dev/null; then
+            echo "should have rejected a malformed address"
+            exit 1
+          fi
+          if node scripts/forensics.mjs 0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045 --chain madeup 2>/dev/null; then
+            echo "should have rejected an unknown chain"
+            exit 1
+          fi
+          echo "input validation OK"
+
+      - name: SKILL.md has usable frontmatter
+        run: |
+          head -1 SKILL.md | grep -q -- "---"
+          grep -q "^name: wallet-forensics$" SKILL.md
+          grep -q "^description: " SKILL.md
+          echo "frontmatter OK"

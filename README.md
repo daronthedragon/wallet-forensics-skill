@@ -96,8 +96,8 @@ Stated plainly, because a forensics tool that oversells itself is worse than non
 - **Cost basis is inferred, not authoritative.** Trades with no stablecoin or native leg are excluded from PnL rather than guessed at. Not tax-ready.
 - **Base's Blockscout instance is unreliable** on `txlist`. Without an Etherscan key, history on Base may be unavailable; the other four EVM chains work keyless.
 - **Exit liquidity checks Uniswap V3 and Jupiter only.** A token with liquidity elsewhere reads as illiquid. "No route found" means *this tool found no route*.
-- **MEV detection finds sandwiches**, not JIT liquidity, backrun-only extraction, or cross-domain MEV.
-- **Solana MEV value is not attributed** — detection is structural; profit attribution needs per-DEX pool modelling.
+- **MEV detection finds sandwiches on EVM chains only**, not JIT liquidity, backrun-only extraction, or cross-domain MEV. Solana sandwich detection is not implemented here — the TypeScript implementation has it.
+- **Sandwich detection needs a capable RPC.** It reads full blocks, which public endpoints often refuse. When blocks cannot be read the report says so explicitly, because zero sandwiches found and zero sandwiches checked are very different claims.
 - **CEX depth is invisible.** A token can be perfectly sellable on Binance and look dead on-chain.
 
 ## Related

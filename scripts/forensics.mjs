@@ -166,6 +166,22 @@ const SEL = {
 
 const TOPIC_APPROVAL = '0x8c5be1e5ebec7d5bd14f71427d1e84f3dd0314c0f7b2291e5b200ac8c7c3b925';
 
+// Transfer(address,address,uint256). ERC-721 shares this topic0 but carries a
+// fourth indexed topic, so a topic-count check filters NFT transfers out.
+const TOPIC_TRANSFER = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
+
+/** Reading full blocks is the slowest thing here. Keep it bounded. */
+const MAX_MEV_BLOCKS = 60;
+
+/** Known MEV bots and builders. Presence raises detector confidence. */
+const KNOWN_MEV_ACTORS = new Set([
+  '0xae2fc483527b8ef99eb5d9b44875f005ba1fae13',
+  '0x6b75d8af000000e20b7a7ddf000ba900b4009a80',
+  '0x00000000003b3cc22af3ae1eac0440bcee416b40',
+  '0xa69babef1ca67a37ffaf7a485dfff3382056e78c',
+  '0x000000000dfde7deaf24138722987c9a6991e2d4',
+]);
+
 /** Left-pad a hex value to a 32-byte ABI word. */
 function word(value) {
   const hex = typeof value === 'bigint' ? value.toString(16) : String(value).replace(/^0x/, '');
@@ -716,6 +732,30 @@ async function analyzeEvm(chainKey, address, prices, opts) {
     liquidity.sort((a, b) => a.liquidityRatio - b.liquidityRatio);
   }
 
+  /* ---- MEV ---- */
+  let mev = [];
+  if (!opts.skipMev && txs.length) {
+    try {
+      const r = await detectSandwiches(url, cfg, address, txs, prices);
+      mev = r.events;
+      if (r.unreadable > 0) {
+        warnings.push(
+          `Sandwich detection could not read ${r.unreadable} of ${r.unreadable + r.inspected} ` +
+            `candidate blocks (RPC rejected or pruned them). A result of zero sandwiches here ` +
+            `means 'could not check', not 'none found'. A dedicated RPC endpoint fixes this.`,
+        );
+      }
+      if (r.totalBlocks > r.inspected + r.unreadable) {
+        warnings.push(
+          `Sandwich detection covered the ${r.inspected + r.unreadable} most recent swap blocks ` +
+            `of ${r.totalBlocks}. Older sandwiches are not counted, so MEV totals are floors.`,
+        );
+      }
+    } catch (e) {
+      warnings.push(`Sandwich detection failed: ${e.message}`);
+    }
+  }
+
   return {
     chain: chainKey,
     label: cfg.label,
@@ -725,7 +765,7 @@ async function analyzeEvm(chainKey, address, prices, opts) {
     balances,
     approvals,
     liquidity,
-    mev: [],
+    mev,
     warnings,
     cfg,
   };
@@ -835,6 +875,184 @@ function labelFor(t) {
   const fn = t.functionName?.split('(')[0]?.trim();
   if (known && fn) return `${known}: ${fn}`;
   return known || fn || undefined;
+}
+
+/* ═════════════════════════════════════════════════════════ MEV detection */
+
+/** A swap moves at least one token out and one in within a single transaction. */
+function isSwapShaped(tx) {
+  let sent = false;
+  let received = false;
+  for (const t of tx.transfers) {
+    if (t.amount < 0n) sent = true;
+    if (t.amount > 0n) received = true;
+  }
+  return sent && received;
+}
+
+/**
+ * Addresses that exchanged tokens with `actor` inside one transaction.
+ *
+ * For a swap these are the pool contracts, which is exactly the fingerprint
+ * needed to confirm an attacker hit the same venue as the victim.
+ */
+function poolsTouched(logs, actor) {
+  const a = actor.toLowerCase();
+  const pools = new Set();
+  for (const l of logs) {
+    if (l.from === a) pools.add(l.to);
+    if (l.to === a) pools.add(l.from);
+  }
+  return pools;
+}
+
+const sharesAny = (a, b) => [...a].some((x) => b.has(x));
+
+/**
+ * Estimate what the attacker captured, in USD.
+ *
+ * They enter a position in the front-run and exit it in the back-run, so their
+ * net gain in wrapped-native or a stablecoin across the pair is the extracted
+ * value. This avoids modelling pool math — it just reads their token flow.
+ *
+ * Returns 0 when flow cannot be measured. Better to under-report than invent.
+ */
+function estimateMevProfit(frontLogs, backLogs, attacker, cfg, nativePrice) {
+  const a = attacker.toLowerCase();
+  const net = (token, decimals) => {
+    let delta = 0n;
+    for (const l of [...frontLogs, ...backLogs]) {
+      if (l.token !== token) continue;
+      if (l.to === a) delta += l.value;
+      if (l.from === a) delta -= l.value;
+    }
+    return Number(delta) / 10 ** decimals;
+  };
+
+  const wrappedGain = net(cfg.wrapped.toLowerCase(), cfg.decimals);
+  if (wrappedGain > 0 && nativePrice) return wrappedGain * nativePrice;
+
+  for (const [stable, decimals] of Object.entries(cfg.stables)) {
+    const gain = net(stable.toLowerCase(), decimals);
+    if (gain > 0) return gain;
+  }
+  return 0;
+}
+
+/**
+ * Detect sandwich attacks against the subject's swaps.
+ *
+ * The structural signature is narrow enough to detect reliably: the same
+ * sender appears immediately before *and* after the victim in the same block,
+ * and all three transactions touch a common pool. The shared-pool check is
+ * what separates a real sandwich from unrelated transactions sitting nearby.
+ *
+ * Confidence is reported honestly:
+ *   high   — adjacent both sides, shared pool, measurable profit or known bot
+ *   medium — adjacent both sides and shared pool, profit not measurable
+ *   low    — same-block bracketing but not directly adjacent
+ */
+async function detectSandwiches(url, cfg, victim, txs, prices) {
+  const swaps = txs.filter((t) => !t.failed && isSwapShaped(t));
+  if (!swaps.length) return { events: [], inspected: 0, totalBlocks: 0 };
+
+  const allBlocks = [...new Set(swaps.map((s) => s.block))].sort((a, b) => b - a);
+  const blocks = allBlocks.slice(0, MAX_MEV_BLOCKS);
+
+  const events = [];
+  const nativePrice = await prices.byId(cfg.cgId);
+  const victimLc = victim.toLowerCase();
+  let unreadable = 0;
+
+  for (const bn of blocks) {
+    const hex = '0x' + bn.toString(16);
+    let blockRes, logRes;
+    try {
+      [blockRes, logRes] = await rpc(url, [
+        { method: 'eth_getBlockByNumber', params: [hex, true] },
+        { method: 'eth_getLogs', params: [{ fromBlock: hex, toBlock: hex, topics: [TOPIC_TRANSFER] }] },
+      ]);
+    } catch {
+      unreadable++; // pruned block or RPC hiccup
+      continue;
+    }
+    if (blockRes?.error || logRes?.error) {
+      unreadable++;
+      continue;
+    }
+
+    const blockTxs = (blockRes.result?.transactions ?? []).map((t, i) => ({
+      hash: (t.hash ?? '').toLowerCase(),
+      from: (t.from ?? '').toLowerCase(),
+      index: t.transactionIndex != null ? Number(t.transactionIndex) : i,
+    }));
+
+    const byTx = new Map();
+    for (const log of logRes.result ?? []) {
+      if (!log.topics || log.topics.length !== 3) continue; // exclude ERC-721
+      const key = (log.transactionHash ?? '').toLowerCase();
+      const entry = {
+        token: (log.address ?? '').toLowerCase(),
+        from: ('0x' + log.topics[1].slice(-40)).toLowerCase(),
+        to: ('0x' + log.topics[2].slice(-40)).toLowerCase(),
+        value: log.data && log.data !== '0x' ? BigInt(log.data.slice(0, 66)) : 0n,
+      };
+      if (!byTx.has(key)) byTx.set(key, []);
+      byTx.get(key).push(entry);
+    }
+
+    for (const vtx of swaps.filter((s) => s.block === bn)) {
+      const vHash = vtx.id.toLowerCase();
+      const vEntry = blockTxs.find((t) => t.hash === vHash);
+      if (!vEntry) continue;
+
+      const victimPools = poolsTouched(byTx.get(vHash) ?? [], victimLc);
+      if (!victimPools.size) continue;
+
+      const before = blockTxs.filter((t) => t.index < vEntry.index).sort((a, b) => b.index - a.index).slice(0, 3);
+      const after = blockTxs.filter((t) => t.index > vEntry.index).sort((a, b) => a.index - b.index).slice(0, 3);
+
+      let match = null;
+      for (const f of before) {
+        if (f.from === victimLc) continue;
+        if (!sharesAny(poolsTouched(byTx.get(f.hash) ?? [], f.from), victimPools)) continue;
+        for (const b of after) {
+          if (b.from !== f.from) continue;
+          if (!sharesAny(poolsTouched(byTx.get(b.hash) ?? [], b.from), victimPools)) continue;
+          match = { attacker: f.from, front: f.hash, back: b.hash, adjacent: before[0] === f && after[0] === b };
+          break;
+        }
+        if (match) break;
+      }
+      if (!match) continue;
+
+      const profit = estimateMevProfit(
+        byTx.get(match.front) ?? [],
+        byTx.get(match.back) ?? [],
+        match.attacker,
+        cfg,
+        nativePrice,
+      );
+      const known = KNOWN_MEV_ACTORS.has(match.attacker);
+
+      events.push({
+        victimTx: vtx.id,
+        block: bn,
+        timestamp: vtx.ts.toISOString(),
+        kind: 'sandwich',
+        attacker: match.attacker,
+        frontTx: match.front,
+        backTx: match.back,
+        extractedUsd: profit,
+        confidence: !match.adjacent ? 'low' : profit > 0 || known ? 'high' : 'medium',
+      });
+    }
+  }
+
+  events.sort((a, b) => b.extractedUsd - a.extractedUsd);
+  // `unreadable` matters: without it, a run where every block read failed is
+  // indistinguishable from a run that genuinely found no sandwiches.
+  return { events, inspected: blocks.length - unreadable, unreadable, totalBlocks: allBlocks.length };
 }
 
 /* ═══════════════════════════════════════════════════════ Solana analysis */
@@ -1300,6 +1518,19 @@ function collectRegrets(chain) {
     });
   }
 
+  const mevTotal = chain.mev.totalExtractedUsd;
+  if (chain.mev.events.length) {
+    const biggest = chain.mev.events[0];
+    out.push({
+      kind: 'mev-victim',
+      title: `Sandwiched ${chain.mev.events.length} time(s)`,
+      detail: mevTotal > 0
+        ? `${usd(mevTotal)} extracted by MEV bots. Largest single hit ${usd(biggest.extractedUsd)} in block ${biggest.block}.`
+        : `Bracketing transactions detected around your swaps, but the extracted value could not be attributed automatically.`,
+      costUsd: mevTotal,
+    });
+  }
+
   for (const a of chain.approvals.filter((x) => x.risk === 'critical' || (x.risk === 'high' && (x.atRiskUsd ?? 0) > 1000))) {
     out.push({
       kind: 'stale-approval',
@@ -1349,6 +1580,7 @@ function renderText(report) {
   L.push(`  Realized PnL             ${signed(t.realizedPnlUsd)}`);
   L.push(`  Unrealized PnL           ${signed(t.unrealizedPnlUsd)}`);
   L.push(`  Fees burned              ${usd(t.feesUsd)}`);
+  if (t.mevExtractedUsd > 0) L.push(`  Lost to MEV              ${usd(t.mevExtractedUsd)}`);
   L.push('');
 
   if (report.topRegrets.length) {
@@ -1473,7 +1705,10 @@ async function main() {
       balances: raw.balances,
       approvals: raw.approvals,
       liquidity: raw.liquidity,
-      mev: { events: raw.mev, totalExtractedUsd: 0 },
+      mev: {
+        events: raw.mev,
+        totalExtractedUsd: raw.mev.reduce((a, e) => a + (e.extractedUsd || 0), 0),
+      },
       warnings: [...raw.warnings],
     };
     if (unvalued > 0) {
@@ -1496,7 +1731,7 @@ async function main() {
       realizedPnlUsd: sum((c) => c.positions.reduce((a, p) => a + p.realizedPnlUsd, 0)),
       unrealizedPnlUsd: sum((c) => c.positions.reduce((a, p) => a + p.unrealizedPnlUsd, 0)),
       feesUsd: sum((c) => c.fees.totalUsdHistorical ?? 0),
-      mevExtractedUsd: 0,
+      mevExtractedUsd: sum((c) => c.mev.totalExtractedUsd),
       portfolioNominalUsd: sum((c) => c.balances.reduce((a, b) => a + (b.valueUsd ?? 0), 0)),
       portfolioRealizableUsd: sum((c) => {
         const q = quoted(c);
