@@ -1,0 +1,7 @@
+node_modules/
+*.log
+.env
+.env.local
+.DS_Store
+reports/
+*.json.tmp
