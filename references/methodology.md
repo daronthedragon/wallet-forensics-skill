@@ -42,6 +42,10 @@ Price impact is `1 - (proceeds / nominal)`. A `liquidityRatio` below ~0.9 means 
 - Ignores CEX depth entirely. A token can be perfectly sellable on Binance and look dead on-chain.
 - It is a point-in-time quote. It moves with the market and will not reproduce tomorrow.
 - Quotes ignore gas, which matters for small positions on mainnet.
+- Only positions the tool knows about get quoted. See below.
+
+**Holdings discovery differs by source.** With no key, Blockscout `tokenlist` returns the actual current holdings. With a key, Etherscan puts that endpoint behind a paid plan, so candidates come from transfer history instead — which only sees the most recent page, meaning a long-held position bought earlier can go unnoticed. That is precisely the illiquid long-tail bag exit-liquidity analysis exists to price, so the keyless path is sometimes the more complete one.
+
 
 ## Sandwich detection
 
@@ -68,8 +72,6 @@ When flow cannot be measured, the event is reported with the value left blank ra
 ## Approval risk
 
 **What is scored.** Not the allowance in isolation — what could be taken *right now*, which is the smaller of the allowance and the current balance. An unlimited approval on an empty wallet risks nothing today. The same approval on a main position is critical. Both are worth mentioning, for different reasons.
-
-**Holdings discovery differs by source.** With no key, Blockscout `tokenlist` returns the actual current holdings. With a key, Etherscan puts that endpoint behind a paid plan, so candidates come from transfer history instead — which only sees the most recent page, meaning a long-held position bought earlier can go unnoticed. That is precisely the illiquid long-tail bag exit-liquidity analysis exists to price, so the keyless path is sometimes the more complete one.
 
 **Two scan paths, and why it matters.**
 
