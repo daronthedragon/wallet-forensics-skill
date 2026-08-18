@@ -36,6 +36,7 @@ const EVM_CHAINS = {
       '0xdac17f958d2ee523a2206206994597c13d831ec7': 6,
       '0x6b175474e89094c44da98b954eedeac495271d0f': 18,
     },
+    blockscout: 'https://eth.blockscout.com/api',
     explorer: 'https://etherscan.io',
   },
   base: {
@@ -52,6 +53,9 @@ const EVM_CHAINS = {
       '0x833589fcd6edb6e08f4c7c32d4f71b54bda02913': 6,
       '0x50c5725949a6f0c72e6c4a641f24049a917db0cb': 18,
     },
+    // Base's Blockscout instance intermittently errors on txlist; with no
+    // Etherscan key, history on this chain may be unavailable.
+    blockscout: 'https://base.blockscout.com/api',
     explorer: 'https://basescan.org',
   },
   arbitrum: {
@@ -69,6 +73,7 @@ const EVM_CHAINS = {
       '0xfd086bc7cd5c481dcc9c85ebe478a1c0b69fcbb9': 6,
       '0xda10009cbd5d07dd0cecc66161fc93d7c9000da1': 18,
     },
+    blockscout: 'https://arbitrum.blockscout.com/api',
     explorer: 'https://arbiscan.io',
   },
   optimism: {
@@ -86,6 +91,7 @@ const EVM_CHAINS = {
       '0x94b008aa00579c1307b0ef2c499ad98a8ce58e58': 6,
       '0xda10009cbd5d07dd0cecc66161fc93d7c9000da1': 18,
     },
+    blockscout: 'https://optimism.blockscout.com/api',
     explorer: 'https://optimistic.etherscan.io',
   },
   polygon: {
@@ -103,6 +109,7 @@ const EVM_CHAINS = {
       '0xc2132d05d31c914a87c6611c10748aeb04b58e8f': 6,
       '0x8f3cf7ad23cd3cadbd9735aff958023239c6a063': 18,
     },
+    blockscout: 'https://polygon.blockscout.com/api',
     explorer: 'https://polygonscan.com',
   },
 };
@@ -342,26 +349,64 @@ class Prices {
 
 /* ══════════════════════════════════════════════════════════ EVM analysis */
 
-async function etherscan(chainId, action, address) {
-  const key = env('ETHERSCAN_API_KEY');
-  if (!key) throw new Error('no-key');
+/**
+ * Which explorer supplies account history.
+ *
+ * Etherscan is more complete but needs a key. Blockscout needs none, which is
+ * what lets this skill produce a full report with zero configuration — the
+ * response shapes match, so everything downstream is unaffected.
+ */
+function historySource() {
+  return env('ETHERSCAN_API_KEY') ? 'etherscan' : 'blockscout';
+}
 
-  const url =
-    `https://api.etherscan.io/v2/api?chainid=${chainId}` +
-    `&module=account&action=${action}&address=${address}` +
-    `&startblock=0&endblock=99999999&sort=desc&apikey=${key}`;
+async function explorer(cfg, action, address) {
+  const key = env('ETHERSCAN_API_KEY');
+  const url = key
+    ? `https://api.etherscan.io/v2/api?chainid=${cfg.chainId}` +
+      `&module=account&action=${action}&address=${address}` +
+      `&startblock=0&endblock=99999999&sort=desc&apikey=${key}`
+    : `${cfg.blockscout}?module=account&action=${action}` +
+      `&address=${address}&startblock=0&endblock=99999999&sort=desc`;
 
   const res = await fetch(url);
-  if (!res.ok) throw new Error(`Etherscan ${res.status}`);
+  if (!res.ok) throw new Error(`${historySource()} ${res.status} on ${action}`);
   const json = await res.json();
 
+  // Both explorers report "nothing found" with the same status they use for
+  // real errors, so an empty result has to be recognised first.
   if (json.status !== '1') {
-    // Etherscan uses status "0" for the perfectly ordinary "nothing found".
-    if (typeof json.result === 'string' && /no transactions found/i.test(json.result)) return [];
     if (Array.isArray(json.result) && json.result.length === 0) return [];
-    throw new Error(`Etherscan ${action}: ${json.message ?? 'error'}`);
+    const detail = typeof json.result === 'string' ? json.result : '';
+    if (/no transactions found|not found|no records/i.test(`${json.message} ${detail}`)) return [];
+    throw new Error(`${historySource()} ${action}: ${json.message ?? 'error'}`);
   }
   return json.result ?? [];
+}
+
+/**
+ * Current token holdings from Blockscout.
+ *
+ * Deriving candidates from transfer history only sees the explorer's most
+ * recent page, so anything bought earlier and simply held goes unnoticed —
+ * precisely the long-tail position that exit-liquidity analysis exists to
+ * price. Etherscan puts the equivalent endpoint behind a paid plan, so the
+ * keyed path keeps using transfer history.
+ */
+async function blockscoutHoldings(cfg, address) {
+  const res = await fetch(`${cfg.blockscout}?module=account&action=tokenlist&address=${address}`);
+  if (!res.ok) return [];
+  const json = await res.json();
+  if (json.status !== '1' || !Array.isArray(json.result)) return [];
+
+  return json.result
+    .filter((t) => t.type === 'ERC-20' && BigInt(t.balance || '0') > 0n)
+    .map((t) => ({
+      address: (t.contractAddress ?? '').toLowerCase(),
+      symbol: t.symbol,
+      decimals: Number(t.decimals ?? 18),
+    }))
+    .filter((t) => t.address);
 }
 
 async function analyzeEvm(chainKey, address, prices, opts) {
@@ -375,8 +420,8 @@ async function analyzeEvm(chainKey, address, prices, opts) {
   let haveHistory = false;
   try {
     const [normal, tokens] = await Promise.all([
-      etherscan(cfg.chainId, 'txlist', address),
-      etherscan(cfg.chainId, 'tokentx', address),
+      explorer(cfg, 'txlist', address),
+      explorer(cfg, 'tokentx', address),
     ]);
     haveHistory = true;
 
@@ -433,7 +478,15 @@ async function analyzeEvm(chainKey, address, prices, opts) {
       });
     }
 
-    txs = [...byHash.values()].sort((a, b) => b.block - a.block).slice(0, opts.max);
+    const all = [...byHash.values()].sort((a, b) => b.block - a.block);
+    txs = all.slice(0, opts.max);
+    if (all.length > opts.max) {
+      warnings.push(
+        `History truncated to the ${opts.max} most recent of ${all.length} transactions (--max). ` +
+          `Wallet age, first-seen and lifetime fee totals are therefore floors, not true values, ` +
+          `and older positions may be missing from cost basis.`,
+      );
+    }
     if (opts.since) txs = txs.filter((t) => t.ts >= opts.since);
 
     // Fee pricing, one lookup per distinct day.
@@ -448,9 +501,11 @@ async function analyzeEvm(chainKey, address, prices, opts) {
     }
   } catch (e) {
     warnings.push(
-      e.message === 'no-key'
-        ? 'ETHERSCAN_API_KEY is not set — transaction history unavailable, so PnL, fee totals and MEV detection are omitted. Balances and approvals are still reported.'
-        : `History unavailable: ${e.message}`,
+      `History unavailable from ${historySource()}: ${e.message}. ` +
+        `PnL, fee totals and MEV detection are omitted; balances and approvals are still reported.` +
+        (historySource() === 'blockscout'
+          ? ' Setting ETHERSCAN_API_KEY switches to Etherscan, which is more complete.'
+          : ''),
     );
   }
 
@@ -458,6 +513,7 @@ async function analyzeEvm(chainKey, address, prices, opts) {
   const balances = [];
   try {
     const [nativeRes] = await rpc(url, [{ method: 'eth_getBalance', params: [address, 'latest'] }]);
+    if (nativeRes?.error) throw new Error(nativeRes.error);
     const nativeRaw = nativeRes?.result ? BigInt(nativeRes.result) : 0n;
     const nativePrice = await prices.byId(cfg.cgId);
     balances.push({
@@ -469,8 +525,17 @@ async function analyzeEvm(chainKey, address, prices, opts) {
       valueUsd: nativePrice ? (Number(nativeRaw) / 10 ** cfg.decimals) * nativePrice : undefined,
     });
 
-    // Candidate tokens come from transfer history — there is no "list my tokens" RPC.
+    // There is no "list my tokens" RPC. Blockscout exposes the real holdings,
+    // which catches long-held positions that never appear in recent transfers;
+    // otherwise fall back to whatever the history touched.
     const seen = new Map();
+    if (historySource() === 'blockscout') {
+      try {
+        for (const t of await blockscoutHoldings(cfg, address)) seen.set(t.address, t);
+      } catch {
+        // Fall through to the history-derived candidates below.
+      }
+    }
     for (const t of txs) {
       for (const tr of t.transfers) {
         if (tr.asset === NATIVE || !tr.asset) continue;
@@ -513,7 +578,15 @@ async function analyzeEvm(chainKey, address, prices, opts) {
     }
     balances.sort((a, b) => (b.valueUsd ?? 0) - (a.valueUsd ?? 0));
   } catch (e) {
-    warnings.push(`Balances unavailable: ${e.message}`);
+    // The native balance is pushed before the token sweep runs, so a failure
+    // here may still leave a partial result. Say which, rather than implying
+    // the whole portfolio reads as empty.
+    warnings.push(
+      balances.length > 0
+        ? `Token balances unavailable: ${e.message}. The native balance below is correct, ` +
+            `but token holdings are missing, so portfolio and exit-liquidity totals are floors, not totals.`
+        : `Balances unavailable: ${e.message}`,
+    );
   }
 
   /* ---- approvals ---- */
@@ -789,6 +862,12 @@ async function analyzeSolana(address, prices, opts) {
     }
 
     const wanted = sigs.slice(0, opts.max);
+    if (sigs.length > opts.max) {
+      warnings.push(
+        `History truncated to the ${opts.max} most recent of ${sigs.length}+ signatures (--max). ` +
+          `Wallet age and lifetime fee totals are floors, not true values.`,
+      );
+    }
     for (const group of chunk(wanted, 50)) {
       const results = await rpc(
         url,

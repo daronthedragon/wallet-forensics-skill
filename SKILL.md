@@ -48,11 +48,11 @@ Output is JSON on stdout by default. Read it and explain it in prose; do not dum
 
 Everything has a working public default. Two optional variables meaningfully improve results:
 
-- `ETHERSCAN_API_KEY` — **required for EVM transaction history**, which means PnL, fee totals, and MEV detection. One key covers all EVM chains (their V2 API is unified). Free tier is sufficient. Without it, only balances and approvals are reported.
+- `ETHERSCAN_API_KEY` — **optional.** Without it, EVM history comes from Blockscout, which needs no key and returns full history on most chains. With it, history comes from Etherscan, which is more complete and more reliable — one key covers every EVM chain (their V2 API is unified), and the free tier is sufficient. Base's Blockscout instance is currently unreliable, so a key matters most there.
 - `SOLANA_RPC_URL` — the public endpoint is heavily rate limited and will be slow or fail on active wallets. A Helius/Triton/QuickNode URL fixes this.
 - `COINGECKO_API_KEY` — optional, raises pricing rate limits.
 
-If a run comes back with warnings about missing keys, say so plainly rather than presenting a partial report as complete.
+Warnings are load-bearing. A run may succeed partially — history truncated by `--max`, token balances lost to a rate limit, an approval scan degraded by an RPC that refuses unbounded log queries. Each of those is reported in `warnings`, and each makes some headline number a floor rather than a total. Read them before presenting any figure as complete.
 
 ## Reading the output
 
@@ -70,6 +70,8 @@ The JSON has this shape:
 **Lead with `topRegrets`.** It is already ranked by dollar cost across every category, and it is what the user actually wants to know.
 
 **The headline number** is `portfolioNominalUsd` vs `portfolioRealizableUsd`. If they diverge by more than a few percent, that gap is the story: *"Your tracker says $84,000. You could actually get about $31,000 out."*
+
+**Check `warnings` first.** They tell you which numbers are trustworthy. "History truncated" means wallet age and lifetime fees are floors. "Token balances unavailable" means the portfolio total is a floor. "Approval scan degraded" means an empty approvals list proves nothing.
 
 **Approvals** are ranked `critical` / `high` / `medium` / `low` by what could be taken **right now** — the smaller of the allowance and the current balance. An unlimited approval on an empty wallet is not urgent; the same approval on their main bag is.
 

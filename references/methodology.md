@@ -69,6 +69,8 @@ When flow cannot be measured, the event is reported with the value left blank ra
 
 **What is scored.** Not the allowance in isolation — what could be taken *right now*, which is the smaller of the allowance and the current balance. An unlimited approval on an empty wallet risks nothing today. The same approval on a main position is critical. Both are worth mentioning, for different reasons.
 
+**Holdings discovery differs by source.** With no key, Blockscout `tokenlist` returns the actual current holdings. With a key, Etherscan puts that endpoint behind a paid plan, so candidates come from transfer history instead — which only sees the most recent page, meaning a long-held position bought earlier can go unnoticed. That is precisely the illiquid long-tail bag exit-liquidity analysis exists to price, so the keyless path is sometimes the more complete one.
+
 **Two scan paths, and why it matters.**
 
 1. **Log scan** (preferred) — `eth_getLogs` for `Approval` events with the owner as topic 1, from genesis. Catches approvals granted indirectly through routers and batchers.
@@ -93,7 +95,8 @@ Fees on reverted transactions are tracked separately. The network charges for th
 
 | Source | Used for | Notes |
 | --- | --- | --- |
-| Etherscan V2 | EVM transaction and token-transfer history | One key, all chains, selected by `chainid` |
+| Etherscan V2 | EVM history, when a key is set | One key, all chains, selected by `chainid` |
+| Blockscout | EVM history and token holdings, when no key is set | No key needed. Response shape matches Etherscan, so nothing downstream changes. Base instance is currently unreliable. |
 | JSON-RPC | Balances, allowances, logs, quoter calls | Batched; public endpoints impose limits |
 | CoinGecko | Spot and historical pricing | Day-resolution cache; free tier is rate limited |
 | Jupiter | Solana routing quotes | No key required |

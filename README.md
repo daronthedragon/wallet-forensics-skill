@@ -2,7 +2,7 @@
 
 An agent skill for forensic analysis of blockchain wallets. Give an agent an address, get back what it actually holds, what it lost, and what still puts it at risk.
 
-Works on **Ethereum, Base, Arbitrum, Optimism, Polygon, and Solana**. Zero dependencies — Node 20+ and nothing else.
+Works on **Ethereum, Base, Arbitrum, Optimism, Polygon, and Solana**. Zero dependencies and no API keys required — Node 20+ and nothing else.
 
 ## What it reports
 
@@ -64,7 +64,7 @@ Everything has a working public default. Two variables meaningfully improve resu
 
 | Variable | Needed for | Notes |
 |---|---|---|
-| `ETHERSCAN_API_KEY` | EVM history → PnL, fees, MEV | One key covers every EVM chain (V2 API is unified). Free tier is enough. Without it, only balances and approvals are reported. |
+| `ETHERSCAN_API_KEY` | EVM history → PnL, fees, MEV | **Optional.** Without it, history comes from Blockscout — no key, full history on most chains. With it, Etherscan is more complete and more reliable; one key covers every EVM chain (V2 API is unified), free tier is enough. |
 | `SOLANA_RPC_URL` | Anything Solana | The public endpoint is heavily rate limited and will 429 on active wallets. Helius/Triton/QuickNode recommended. |
 | `COINGECKO_API_KEY` | Faster pricing | Optional. |
 
@@ -85,13 +85,16 @@ references/interpreting-results.md    turning a report into a useful explanation
 
 The one cost is ABI encoding. Function selectors are Keccak-256 hashes, and Node's `crypto` ships NIST SHA-3 — a different algorithm producing different output. Selectors are therefore hardcoded alongside their signatures. They are permanent constants of the ERC-20 and Uniswap interfaces, so this is safe.
 
-**Every stage degrades independently.** If approval scanning fails because the RPC rejects unbounded log queries, you still get PnL, fees, and liquidity — plus a warning saying exactly what is missing and why. Nothing is silently dropped, and the skill instructs the agent never to present a degraded scan as a clean bill of health.
+**Every stage degrades independently.** If approval scanning fails because the RPC rejects unbounded log queries, you still get PnL, fees, and liquidity — plus a warning saying exactly what is missing and why.
+
+The warnings are specific about *which* number they undermine, because a vague one is worse than none. A failed token sweep after a successful native balance reports that the portfolio total is a floor rather than claiming balances are simply unavailable. History truncated by `--max` reports that wallet age and lifetime fees are floors too. The skill instructs the agent to read these before presenting any figure as complete, and never to treat a degraded approval scan as a clean bill of health.
 
 ## Limitations
 
 Stated plainly, because a forensics tool that oversells itself is worse than none:
 
 - **Cost basis is inferred, not authoritative.** Trades with no stablecoin or native leg are excluded from PnL rather than guessed at. Not tax-ready.
+- **Base's Blockscout instance is unreliable** on `txlist`. Without an Etherscan key, history on Base may be unavailable; the other four EVM chains work keyless.
 - **Exit liquidity checks Uniswap V3 and Jupiter only.** A token with liquidity elsewhere reads as illiquid. "No route found" means *this tool found no route*.
 - **MEV detection finds sandwiches**, not JIT liquidity, backrun-only extraction, or cross-domain MEV.
 - **Solana MEV value is not attributed** — detection is structural; profit attribution needs per-DEX pool modelling.
