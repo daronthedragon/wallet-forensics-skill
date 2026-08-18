@@ -1,5 +1,7 @@
 # wallet-forensics skill
 
+[![CI](https://github.com/daronthedragon/wallet-forensics-skill/actions/workflows/ci.yml/badge.svg)](https://github.com/daronthedragon/wallet-forensics-skill/actions/workflows/ci.yml)
+
 An agent skill for forensic analysis of blockchain wallets. Give an agent an address, get back what it actually holds, what it lost, and what still puts it at risk.
 
 Works on **Ethereum, Base, Arbitrum, Optimism, Polygon, and Solana**. Zero dependencies and no API keys required — Node 20+ and nothing else.
