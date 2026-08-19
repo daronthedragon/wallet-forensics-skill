@@ -27,6 +27,7 @@ import {
   wrap,
 } from '../core/analysis.mjs';
 import { FOREVER, createCache } from '../core/cache.mjs';
+import { fetchLlamaTokenPrices } from '../core/prices.mjs';
 
 /* ═══════════════════════════════════════════════════════════ chain config */
 
@@ -43,6 +44,7 @@ export const EVM_CHAINS = {
     decimals: 18,
     cgId: 'ethereum',
     cgPlatform: 'ethereum',
+    llama: 'ethereum',
     quoter: UNISWAP_QUOTER_V2,
     wrapped: '0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2',
     stables: {
@@ -61,6 +63,7 @@ export const EVM_CHAINS = {
     decimals: 18,
     cgId: 'ethereum',
     cgPlatform: 'base',
+    llama: 'base',
     quoter: '0x3d4e44Eb1374240CE5F1B871ab261CD16335B76a',
     wrapped: '0x4200000000000000000000000000000000000006',
     stables: {
@@ -80,6 +83,7 @@ export const EVM_CHAINS = {
     decimals: 18,
     cgId: 'ethereum',
     cgPlatform: 'arbitrum-one',
+    llama: 'arbitrum',
     quoter: UNISWAP_QUOTER_V2,
     wrapped: '0x82af49447d8a07e3bd95bd0d56f35241523fbab1',
     stables: {
@@ -98,6 +102,7 @@ export const EVM_CHAINS = {
     decimals: 18,
     cgId: 'ethereum',
     cgPlatform: 'optimistic-ethereum',
+    llama: 'optimism',
     quoter: UNISWAP_QUOTER_V2,
     wrapped: '0x4200000000000000000000000000000000000006',
     stables: {
@@ -116,6 +121,7 @@ export const EVM_CHAINS = {
     decimals: 18,
     cgId: 'matic-network',
     cgPlatform: 'polygon-pos',
+    llama: 'polygon',
     quoter: UNISWAP_QUOTER_V2,
     wrapped: '0x0d500b1d8e8ef31e21c99d1db9a6444d3adf1270',
     stables: {
@@ -135,6 +141,7 @@ const SOLANA = {
   decimals: 9,
   cgId: 'solana',
   cgPlatform: 'solana',
+  llama: 'solana',
   explorer: 'https://solscan.io',
   usdc: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v',
   stables: {
@@ -374,7 +381,21 @@ class Prices {
   }
 
   /** Token prices by contract address, batched 100 at a time. */
-  async tokens(platform, addresses) {
+  /**
+   * Current USD prices for a set of tokens.
+   *
+   * DefiLlama first, because it takes a hundred addresses per request and needs
+   * no key. CoinGecko's unkeyed tier rejects any request carrying more than one
+   * address, so pricing an airdrop-stuffed wallet through it alone means one
+   * throttled request per token — thousands of them, hours of wall clock.
+   *
+   * Whatever DefiLlama could not price falls through to CoinGecko only while
+   * the remainder is small enough to be worth the throttle. Beyond that the
+   * tokens stay unpriced, which callers already treat as unknown rather than
+   * zero.
+   */
+  async tokens(chainCfg, addresses) {
+    const platform = chainCfg.cgPlatform;
     const out = new Map();
     const need = [];
     for (const a of addresses) {
@@ -382,8 +403,30 @@ class Prices {
       if (this.#current.has(key)) out.set(a, this.#current.get(key));
       else if (!this.#missing.has(key)) need.push(a);
     }
+    if (need.length === 0) return out;
 
-    for (const group of chunk(need, 100)) {
+    const remaining = [];
+    if (chainCfg.llama) {
+      const priced = await fetchLlamaTokenPrices(chainCfg.llama, need);
+      for (const a of need) {
+        const hit = priced.get(a);
+        if (hit) {
+          this.#current.set(`${platform}:${a.toLowerCase()}`, hit.price);
+          out.set(a, hit.price);
+        } else {
+          remaining.push(a);
+        }
+      }
+    } else {
+      remaining.push(...need);
+    }
+
+    // One CoinGecko request per token on the free tier, so this is only worth
+    // doing for a handful. A long tail of unpriceable spam is not worth an hour.
+    const FALLBACK_LIMIT = this.key ? 500 : 25;
+    const batchSize = this.key ? 100 : 1;
+
+    for (const group of chunk(remaining.slice(0, FALLBACK_LIMIT), batchSize)) {
       try {
         const json = await this.#get(
           `${this.base}/simple/token_price/${platform}` +
@@ -401,6 +444,11 @@ class Prices {
         for (const a of group) this.#missing.add(`${platform}:${a.toLowerCase()}`);
       }
     }
+
+    for (const a of remaining.slice(FALLBACK_LIMIT)) {
+      this.#missing.add(`${platform}:${a.toLowerCase()}`);
+    }
+
     return out;
   }
 }
@@ -466,6 +514,10 @@ async function blockscoutHoldings(cfg, address) {
       address: (t.contractAddress ?? '').toLowerCase(),
       symbol: t.symbol,
       decimals: Number(t.decimals ?? 18),
+      // The balance is already here. Re-reading it over RPC means one eth_call
+      // per token, and an airdrop-stuffed wallet holds thousands — which is
+      // exactly the batch public endpoints reject outright.
+      balance: BigInt(t.balance || '0'),
     }))
     .filter((t) => t.address);
 }
@@ -607,8 +659,19 @@ async function analyzeEvm(chainKey, address, prices, opts) {
     }
 
     const candidates = [...seen.values()];
+
     const held = [];
-    for (const group of chunk(candidates, 80)) {
+    // Where the explorer already reported a balance, that is the answer.
+    // Re-reading those over RPC is one eth_call per token, and an
+    // airdrop-stuffed wallet holds thousands — the batch public endpoints
+    // reject outright. Only tokens without a known balance get swept.
+    const needSweep = [];
+    for (const c of candidates) {
+      if (c.balance !== undefined && c.balance > 0n) held.push({ ...c, amount: c.balance });
+      else needSweep.push(c);
+    }
+
+    for (const group of chunk(needSweep, 80)) {
       const results = await rpc(
         url,
         group.map((c) => ({
@@ -624,7 +687,7 @@ async function analyzeEvm(chainKey, address, prices, opts) {
     }
 
     if (held.length) {
-      const priceMap = await prices.tokens(cfg.cgPlatform, held.map((h) => h.address));
+      const priceMap = await prices.tokens(cfg, held.map((h) => h.address));
       for (const h of held) {
         const p = priceMap.get(h.address);
         balances.push({
@@ -701,7 +764,7 @@ async function analyzeEvm(chainKey, address, prices, opts) {
             { method: 'eth_call', params: [{ to: l.token, data: SEL.decimals }, 'latest'] },
           ]),
         );
-        const priceMap = await prices.tokens(cfg.cgPlatform, live.map((l) => l.token));
+        const priceMap = await prices.tokens(cfg, live.map((l) => l.token));
 
         live.forEach((l, i) => {
           const symbol = decodeString(meta[i * 2]?.result) ?? undefined;
@@ -1190,7 +1253,7 @@ async function analyzeSolana(address, prices, opts) {
     }
 
     if (holdings.size) {
-      const priceMap = await prices.tokens(SOLANA.cgPlatform, [...holdings.keys()]);
+      const priceMap = await prices.tokens(SOLANA, [...holdings.keys()]);
       for (const [mint, h] of holdings) {
         const p = priceMap.get(mint);
         balances.push({
@@ -1205,7 +1268,7 @@ async function analyzeSolana(address, prices, opts) {
     balances.sort((a, b) => (b.valueUsd ?? 0) - (a.valueUsd ?? 0));
 
     if (approvals.length) {
-      const priceMap = await prices.tokens(SOLANA.cgPlatform, approvals.map((a) => a.asset));
+      const priceMap = await prices.tokens(SOLANA, approvals.map((a) => a.asset));
       for (const a of approvals) {
         const p = priceMap.get(a.asset);
         const delegated = BigInt(a.allowance);
