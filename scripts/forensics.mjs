@@ -26,6 +26,7 @@ import {
   usd,
   wrap,
 } from '../core/analysis.mjs';
+import { FOREVER, createCache } from '../core/cache.mjs';
 
 /* ═══════════════════════════════════════════════════════════ chain config */
 
@@ -291,10 +292,13 @@ class Prices {
   #missing = new Set();
   #last = 0;
 
-  constructor() {
+  constructor(opts = {}) {
     this.key = env('COINGECKO_API_KEY');
     this.base = this.key ? 'https://pro-api.coingecko.com/api/v3' : 'https://api.coingecko.com/api/v3';
     this.interval = this.key ? 120 : 2200;
+    // Only historical daily prices go to disk. They are facts about a day that
+    // has already ended, so they can never become wrong.
+    this.cache = createCache('prices', { disabled: opts.noCache });
   }
 
   async #get(url) {
@@ -338,16 +342,32 @@ class Prices {
     if (this.#historical.has(key)) return this.#historical.get(key);
     if (this.#missing.has(key)) return undefined;
 
+    const cached = this.cache.get(key);
+    if (cached !== undefined) {
+      // A recorded absence is cached too: re-asking costs a full request and
+      // CoinGecko will not have grown history for a day it never had.
+      if (cached === null) {
+        this.#missing.add(key);
+        return undefined;
+      }
+      this.#historical.set(key, cached);
+      return cached;
+    }
+
     const [y, m, d] = day.split('-');
     try {
       const json = await this.#get(`${this.base}/coins/${id}/history?date=${d}-${m}-${y}&localization=false`);
       const price = json?.market_data?.current_price?.usd;
       if (typeof price === 'number') {
         this.#historical.set(key, price);
+        this.cache.set(key, price, FOREVER);
         return price;
       }
+      // A day with no data stays absent; remember that for a week in case it
+      // is ever backfilled.
+      this.cache.set(key, null, 7 * 24 * 60 * 60 * 1000);
     } catch {
-      /* fall through */
+      /* a request that failed may succeed later, so it is not recorded */
     }
     this.#missing.add(key);
     return undefined;
@@ -1418,6 +1438,12 @@ function renderText(report) {
     L.push('');
   }
 
+  if (report.cache && report.cache.hits > 0) {
+    const saved = (report.cache.hits * 2.2).toFixed(0);
+    L.push(`  cache: ${report.cache.hits} hits, ${report.cache.misses} misses (~${saved}s of requests skipped)`);
+    L.push('');
+  }
+
   for (const c of report.chains) {
     L.push(`  ${c.label.toUpperCase()} — ${c.address}`);
     if (c.activity.totalTxs) {
@@ -1449,6 +1475,7 @@ const USAGE = `
     --text           Human-readable summary instead of JSON
     --max <n>        Cap transactions fetched (default 2000)
     --since <date>   Only analyze activity from this date (YYYY-MM-DD)
+    --no-cache       Ignore the on-disk cache of historical prices
     --no-liquidity   Skip exit-liquidity routing quotes
     --no-mev         Skip sandwich detection
     -h, --help       Show this message
@@ -1463,7 +1490,7 @@ async function main() {
 
   const addresses = [];
   const chains = [];
-  const opts = { max: 2000, skipLiquidity: false, skipMev: false, since: undefined };
+  const opts = { max: 2000, skipLiquidity: false, skipMev: false, since: undefined, noCache: false };
   let text = false;
 
   for (let i = 0; i < argv.length; i++) {
@@ -1481,7 +1508,8 @@ async function main() {
       const d = new Date(argv[++i]);
       if (Number.isNaN(d.getTime())) die('--since needs a valid YYYY-MM-DD date');
       opts.since = d;
-    } else if (a === '--no-liquidity') opts.skipLiquidity = true;
+    } else if (a === '--no-cache') opts.noCache = true;
+    else if (a === '--no-liquidity') opts.skipLiquidity = true;
     else if (a === '--no-mev') opts.skipMev = true;
     else if (a.startsWith('-')) die(`unknown option ${a}`);
     else addresses.push(a);
@@ -1489,7 +1517,7 @@ async function main() {
 
   if (!addresses.length) die('no address provided');
 
-  const prices = new Prices();
+  const prices = new Prices({ noCache: opts.noCache });
   const targets = [];
   for (const addr of addresses) {
     const isEvm = /^0x[0-9a-fA-F]{40}$/.test(addr);
@@ -1576,6 +1604,19 @@ async function main() {
     },
     topRegrets: chainReports.flatMap((c) => c.regrets).sort((a, b) => b.costUsd - a.costUsd).slice(0, 10),
   };
+
+  prices.cache.flush();
+
+  const cacheStats = prices.cache.stats();
+  if (!cacheStats.disabled && cacheStats.hits + cacheStats.misses > 0) {
+    // Each hit is a request not made, and the unkeyed CoinGecko tier allows
+    // roughly one every 2.2 seconds.
+    report.cache = {
+      hits: cacheStats.hits,
+      misses: cacheStats.misses,
+      entries: cacheStats.size,
+    };
+  }
 
   process.stdout.write(
     text

@@ -96,8 +96,29 @@ node scripts/forensics.mjs 0xd8dA... --all-evm --json > report.json
 | `--text` | Human-readable summary instead of JSON |
 | `--max <n>` | Cap transactions fetched (default 2000) |
 | `--since <date>` | Only activity from this date |
+| `--no-cache` | Ignore the on-disk cache of historical prices |
 | `--no-liquidity` | Skip routing quotes |
 | `--no-mev` | Skip sandwich detection |
+
+## Caching
+
+Historical daily prices are cached to disk permanently, because a price for a
+day that has already ended cannot change. Nothing volatile is cached — spot
+prices and balances are always fetched, since a stale one is a wrong number
+presented confidently, which is the failure this tool exists to avoid.
+
+It matters because the unkeyed CoinGecko tier allows roughly one call every
+2.2 seconds, and a wallet with real history asks about hundreds of distinct
+days. Measured on the same 60-transaction run, same inputs:
+
+```
+cached      12s   (14 hits, 0 misses)
+--no-cache  49s
+```
+
+Cache lives in `~/.cache/wallet-forensics/`, overridable with
+`WALLET_FORENSICS_CACHE_DIR`, and disabled with `--no-cache` or
+`WALLET_FORENSICS_NO_CACHE=1`.
 
 ## Configuration
 
