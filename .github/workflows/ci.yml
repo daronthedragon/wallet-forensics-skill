@@ -16,7 +16,9 @@ jobs:
           node-version: '20'
 
       - name: Syntax check the analyzer
-        run: node --check scripts/forensics.mjs
+        run: |
+          node --check scripts/forensics.mjs
+          node --check core/analysis.mjs
 
       - name: Tests
         run: node --test test/*.test.mjs

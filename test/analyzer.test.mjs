@@ -2,15 +2,14 @@ import assert from 'node:assert/strict';
 import { test, describe } from 'node:test';
 
 import {
-  EVM_CHAINS,
-  QUOTE_REASONS,
   collectRegrets,
   computePositions,
   estimateMevProfit,
   isSwapShaped,
   poolsTouched,
   wrap,
-} from '../scripts/forensics.mjs';
+} from '../core/analysis.mjs';
+import { EVM_CHAINS, QUOTE_REASONS } from '../scripts/forensics.mjs';
 
 const USDC = '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48';
 const WIF = '0x1111111111111111111111111111111111111111';
@@ -25,7 +24,7 @@ describe('cost basis', () => {
     // 1000 USDC in for 100 WIF, then half sold back for 200 USDC.
     // Half the $1000 basis is released against $200 of proceeds = -$300.
     const result = {
-      cfg: eth,
+      stables: eth.stables,
       balances: [{ asset: WIF, decimals: 18, amount: 50n * 10n ** 18n, valueUsd: 200 }],
       txs: [
         tx({
@@ -56,7 +55,7 @@ describe('cost basis', () => {
 
   test('anchors on the native leg when no stablecoin is present', () => {
     const result = {
-      cfg: eth,
+      stables: eth.stables,
       balances: [],
       txs: [
         tx({
@@ -75,7 +74,7 @@ describe('cost basis', () => {
 
   test('counts transfers it cannot value instead of inventing a basis', () => {
     const result = {
-      cfg: eth,
+      stables: eth.stables,
       balances: [],
       txs: [tx({ transfers: [{ asset: WIF, decimals: 18, amount: 500n * 10n ** 18n }] })],
     };
@@ -89,7 +88,7 @@ describe('cost basis', () => {
     // A failed balance fetch yields an empty array. Treating that as "holds
     // nothing" would silently wipe every reconstructed position.
     const result = {
-      cfg: eth,
+      stables: eth.stables,
       balances: [],
       txs: [
         tx({
@@ -109,7 +108,7 @@ describe('cost basis', () => {
 
   test('treats stablecoins as the numeraire, not as a position', () => {
     const result = {
-      cfg: eth,
+      stables: eth.stables,
       balances: [],
       txs: [
         tx({
@@ -224,14 +223,14 @@ describe('sandwich detection', () => {
       [{ token: w, from: '0xbot', to: '0xpool', value: 10n ** 18n }], // spends 1
       [{ token: w, from: '0xpool', to: '0xbot', value: 3n * 10n ** 18n }], // recovers 3
       '0xbot',
-      eth,
+      { wrappedNative: eth.wrapped, nativeDecimals: eth.decimals, stables: eth.stables },
       2000,
     );
     assert.equal(Math.round(profit), 4000, 'net +2 wrapped native at $2000');
   });
 
   test('unmeasurable flow reports zero rather than a guess', () => {
-    const profit = estimateMevProfit([], [], '0xbot', eth, 2000);
+    const profit = estimateMevProfit([], [], '0xbot', { wrappedNative: eth.wrapped, nativeDecimals: eth.decimals, stables: eth.stables }, 2000);
     assert.equal(profit, 0);
   });
 });
