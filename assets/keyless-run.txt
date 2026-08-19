@@ -1,0 +1,18 @@
+node scripts/forensics.mjs 0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045 --chain base --no-mev --text
+
+  WALLET FORENSICS
+  ──────────────────────────────────────────────────────────────────────
+  Portfolio (nominal)      $5,998
+  Realized PnL             $0
+  Unrealized PnL           $0
+  Fees burned              $0.00
+
+  BASE — 0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045
+    note: History unavailable from blockscout: blockscout 429 on tokentx. PnL,
+    fee totals and MEV detection are omitted; balances and approvals are still
+    reported. Setting ETHERSCAN_API_KEY switches to Etherscan, which is more
+    complete.
+    note: Approval scan was degraded: this RPC rejects unbounded eth_getLogs
+    and no approve() calls were found in the fetched history. Coverage is
+    incomplete — use an Alchemy/Infura endpoint for a full scan. Do not read
+    this as "no risky approvals".

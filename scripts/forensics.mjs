@@ -222,6 +222,14 @@ function env(key, fallback = '') {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /**
+ * Deadline for every outbound request. Public explorers and RPCs stall rather
+ * than refuse often enough that an unbounded fetch can hang a run
+ * indefinitely, producing no output and no explanation.
+ */
+const FETCH_TIMEOUT_MS = Number(env('FETCH_TIMEOUT_MS', '20000'));
+const deadline = () => ({ signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
+
+/**
  * JSON-RPC call. Accepts a single {method, params} or an array of them, in
  * which case it uses a batch request — one round trip for N reads, which is
  * what makes reading hundreds of balances tolerable without multicall.
@@ -234,6 +242,7 @@ async function rpc(url, calls) {
   const body = list.map((c, i) => ({ jsonrpc: '2.0', id: i, method: c.method, params: c.params }));
 
   const res = await fetch(url, {
+    ...deadline(),
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(batch ? body : body[0]),
@@ -283,10 +292,10 @@ class Prices {
     const headers = { accept: 'application/json' };
     if (this.key) headers['x-cg-pro-api-key'] = this.key;
 
-    let res = await fetch(url, { headers });
+    let res = await fetch(url, { headers, ...deadline() });
     if (res.status === 429) {
       await sleep(3000);
-      res = await fetch(url, { headers });
+      res = await fetch(url, { headers, ...deadline() });
     }
     if (!res.ok) throw new Error(`CoinGecko ${res.status}`);
     return res.json();
@@ -385,7 +394,7 @@ async function explorer(cfg, action, address) {
     : `${cfg.blockscout}?module=account&action=${action}` +
       `&address=${address}&startblock=0&endblock=99999999&sort=desc`;
 
-  const res = await fetch(url);
+  const res = await fetch(url, deadline());
   if (!res.ok) throw new Error(`${historySource()} ${res.status} on ${action}`);
   const json = await res.json();
 
@@ -410,7 +419,10 @@ async function explorer(cfg, action, address) {
  * keyed path keeps using transfer history.
  */
 async function blockscoutHoldings(cfg, address) {
-  const res = await fetch(`${cfg.blockscout}?module=account&action=tokenlist&address=${address}`);
+  const res = await fetch(
+    `${cfg.blockscout}?module=account&action=tokenlist&address=${address}`,
+    deadline(),
+  );
   if (!res.ok) return [];
   const json = await res.json();
   if (json.status !== '1' || !Array.isArray(json.result)) return [];
@@ -1314,7 +1326,7 @@ async function quoteJupiter(balance) {
     `?inputMint=${balance.asset}&outputMint=${SOLANA.usdc}` +
     `&amount=${balance.amount.toString()}&slippageBps=50`;
   try {
-    const res = await fetch(url);
+    const res = await fetch(url, deadline());
     if (!res.ok) return null;
     const json = await res.json();
     if (!json.outAmount) return null;
@@ -1566,6 +1578,27 @@ const usd = (n) =>
 
 const short = (s) => (s && s.length > 14 ? `${s.slice(0, 6)}…${s.slice(-4)}` : s);
 
+/**
+ * Soft-wrap a note to terminal width. Warnings carry real explanation and run
+ * long; left unwrapped they blow past any sane terminal and make the report
+ * unreadable in exactly the moment something has gone wrong.
+ */
+function wrap(text, indent, width = 74) {
+  const pad = ' '.repeat(indent);
+  const lines = [];
+  let line = '';
+  for (const word of text.split(/\s+/)) {
+    if (line && line.length + word.length + 1 > width) {
+      lines.push(pad + line);
+      line = word;
+    } else {
+      line = line ? `${line} ${word}` : word;
+    }
+  }
+  if (line) lines.push(pad + line);
+  return lines.join('\n');
+}
+
 function renderText(report) {
   const L = [];
   const t = report.totals;
@@ -1602,7 +1635,7 @@ function renderText(report) {
       L.push(`    fees: ${c.fees.nativeFloat.toFixed(4)} ${c.fees.nativeSymbol}` +
         (c.fees.totalUsdHistorical ? ` (${usd(c.fees.totalUsdHistorical)})` : ''));
     }
-    for (const w of c.warnings) L.push(`    note: ${w}`);
+    for (const w of c.warnings) L.push(wrap(`note: ${w}`, 4));
     L.push('');
   }
   return L.join('\n');

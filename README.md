@@ -28,6 +28,45 @@ Portfolio (nominal)      $84,210
 Portfolio (realizable)   $31,447    62.7% evaporates on exit
 ```
 
+_Those two figures are illustrative — they show what the gap looks like, not a specific wallet. A real captured run is below._
+
+## What a keyless run actually looks like
+
+No API keys, no install, public infrastructure throttling everything it can:
+
+<p align="center">
+  <img src="assets/keyless-run.svg" width="720"
+       alt="Terminal showing the skill analyzing an address on Base: a $5,998 nominal portfolio, zero PnL and fees, and two notes explaining that Blockscout returned 429 on token transfers and that the approval scan was degraded because the RPC refused an unbounded log query.">
+</p>
+
+<details>
+<summary>Same output as text</summary>
+
+```
+node scripts/forensics.mjs 0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045 --chain base --no-mev --text
+
+  WALLET FORENSICS
+  ──────────────────────────────────────────────────────────────────────
+  Portfolio (nominal)      $5,998
+  Realized PnL             $0
+  Unrealized PnL           $0
+  Fees burned              $0.00
+
+  BASE — 0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045
+    note: History unavailable from blockscout: blockscout 429 on tokentx. PnL,
+    fee totals and MEV detection are omitted; balances and approvals are still
+    reported. Setting ETHERSCAN_API_KEY switches to Etherscan, which is more
+    complete.
+    note: Approval scan was degraded: this RPC rejects unbounded eth_getLogs
+    and no approve() calls were found in the fetched history. Coverage is
+    incomplete — use an Alchemy/Infura endpoint for a full scan. Do not read
+    this as "no risky approvals".
+```
+
+</details>
+
+Every zero carries the reason it is a zero. The report never says "no risky approvals" when what happened was "the approval scan was refused" — those are different claims, and conflating them is how a security tool gets someone hurt.
+
 ## Install
 
 Drop the folder into your agent's skills directory:
