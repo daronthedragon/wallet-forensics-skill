@@ -14,13 +14,15 @@
  * constants of the ERC-20 and Uniswap interfaces.
  */
 
+import { pathToFileURL } from 'node:url';
+
 /* ═══════════════════════════════════════════════════════════ chain config */
 
 const NATIVE = 'native';
 
 const UNISWAP_QUOTER_V2 = '0x61fFE014bA17989E743c5F6cB21bF9697530B21e';
 
-const EVM_CHAINS = {
+export const EVM_CHAINS = {
   ethereum: {
     label: 'Ethereum',
     chainId: 1,
@@ -730,18 +732,22 @@ async function analyzeEvm(chainKey, address, prices, opts) {
       }
       const q = await quoteEvmSell(url, cfg, b, prices);
       liquidity.push(
-        q ?? {
-          asset: b.asset,
-          symbol: b.symbol,
-          nominalUsd: b.valueUsd,
-          realizableUsd: 0,
-          fullExitImpact: 1,
-          liquidityRatio: 0,
-          error: 'No route found — this position may be unsellable',
-        },
+        q.quoted
+          ? q
+          : {
+              quoted: false,
+              asset: b.asset,
+              symbol: b.symbol,
+              nominalUsd: b.valueUsd,
+              // Unknown, not zero — only a genuine absence of route is a loss.
+              realizableUsd: q.reason === 'no-route' ? 0 : undefined,
+              fullExitImpact: q.reason === 'no-route' ? 1 : undefined,
+              liquidityRatio: q.reason === 'no-route' ? 0 : undefined,
+              error: QUOTE_REASONS[q.reason],
+            },
       );
     }
-    liquidity.sort((a, b) => a.liquidityRatio - b.liquidityRatio);
+    liquidity.sort((a, b) => (a.liquidityRatio ?? 1) - (b.liquidityRatio ?? 1));
   }
 
   /* ---- MEV ---- */
@@ -830,8 +836,16 @@ async function collectApprovals(url, address, txs) {
 }
 
 /** Simulate selling a position through Uniswap V3, probing each fee tier. */
-async function quoteEvmSell(url, cfg, balance, prices) {
-  if (!cfg.quoter) return null;
+/**
+ * Simulate selling a position through Uniswap V3.
+ *
+ * Returns `{ quoted: false, reason }` rather than a bare null. The distinction
+ * matters: "no pool exists" means the position genuinely cannot be sold, while
+ * "the RPC refused" means we could not ask. Collapsing both into zero tells a
+ * user their holding is worthless when it may be perfectly liquid.
+ */
+export async function quoteEvmSell(url, cfg, balance, prices) {
+  if (!cfg.quoter) return { quoted: false, reason: 'unsupported' };
   if (balance.asset === cfg.wrapped) {
     return {
       asset: balance.asset,
@@ -844,9 +858,10 @@ async function quoteEvmSell(url, cfg, balance, prices) {
   }
 
   const nativePrice = await prices.byId(cfg.cgId);
-  if (!nativePrice || !balance.valueUsd) return null;
+  if (!nativePrice || !balance.valueUsd) return { quoted: false, reason: 'unpriced' };
 
   let best = 0n;
+  let refused = 0;
   for (const fee of [500, 3000, 10000]) {
     const data =
       SEL.quoteExactInputSingle +
@@ -859,20 +874,28 @@ async function quoteEvmSell(url, cfg, balance, prices) {
       const [r] = await rpc(url, [
         { method: 'eth_call', params: [{ to: cfg.quoter, data }, 'latest'] },
       ]);
-      if (r?.error || !r?.result || r.result === '0x') continue;
+      if (r?.error) {
+        refused++;
+        continue;
+      }
+      if (!r?.result || r.result === '0x') continue; // no pool at this tier
       const out = decodeUint(r.result);
       if (out > best) best = out;
     } catch {
-      /* no pool at this tier */
+      refused++;
     }
   }
 
-  if (best === 0n) return null;
+  // Every tier erroring is an unanswered question, not an empty market.
+  if (best === 0n) {
+    return { quoted: false, reason: refused === 3 ? 'refused' : 'no-route' };
+  }
 
   const realizableUsd = (Number(best) / 10 ** cfg.decimals) * nativePrice;
   const impact = balance.valueUsd > 0 ? Math.max(0, 1 - realizableUsd / balance.valueUsd) : 0;
 
   return {
+    quoted: true,
     asset: balance.asset,
     symbol: balance.symbol,
     nominalUsd: balance.valueUsd,
@@ -889,10 +912,17 @@ function labelFor(t) {
   return known || fn || undefined;
 }
 
+export const QUOTE_REASONS = {
+  'no-route': 'No route found — this position may genuinely be unsellable',
+  refused: 'Quote unavailable — the endpoint refused the request, so this is unknown, not zero',
+  unpriced: 'No spot price available, so price impact cannot be computed',
+  unsupported: 'No Uniswap V3 deployment on this chain to quote against',
+};
+
 /* ═════════════════════════════════════════════════════════ MEV detection */
 
 /** A swap moves at least one token out and one in within a single transaction. */
-function isSwapShaped(tx) {
+export function isSwapShaped(tx) {
   let sent = false;
   let received = false;
   for (const t of tx.transfers) {
@@ -908,7 +938,7 @@ function isSwapShaped(tx) {
  * For a swap these are the pool contracts, which is exactly the fingerprint
  * needed to confirm an attacker hit the same venue as the victim.
  */
-function poolsTouched(logs, actor) {
+export function poolsTouched(logs, actor) {
   const a = actor.toLowerCase();
   const pools = new Set();
   for (const l of logs) {
@@ -929,7 +959,7 @@ const sharesAny = (a, b) => [...a].some((x) => b.has(x));
  *
  * Returns 0 when flow cannot be measured. Better to under-report than invent.
  */
-function estimateMevProfit(frontLogs, backLogs, attacker, cfg, nativePrice) {
+export function estimateMevProfit(frontLogs, backLogs, attacker, cfg, nativePrice) {
   const a = attacker.toLowerCase();
   const net = (token, decimals) => {
     let delta = 0n;
@@ -1236,18 +1266,21 @@ async function analyzeSolana(address, prices, opts) {
       }
       const q = await quoteJupiter(b);
       liquidity.push(
-        q ?? {
-          asset: b.asset,
-          symbol: b.symbol,
-          nominalUsd: b.valueUsd,
-          realizableUsd: 0,
-          fullExitImpact: 1,
-          liquidityRatio: 0,
-          error: 'No route found — this position may be unsellable',
-        },
+        q.quoted
+          ? q
+          : {
+              quoted: false,
+              asset: b.asset,
+              symbol: b.symbol,
+              nominalUsd: b.valueUsd,
+              realizableUsd: q.reason === 'no-route' ? 0 : undefined,
+              fullExitImpact: q.reason === 'no-route' ? 1 : undefined,
+              liquidityRatio: q.reason === 'no-route' ? 0 : undefined,
+              error: QUOTE_REASONS[q.reason],
+            },
       );
     }
-    liquidity.sort((a, b) => a.liquidityRatio - b.liquidityRatio);
+    liquidity.sort((a, b) => (a.liquidityRatio ?? 1) - (b.liquidityRatio ?? 1));
   }
 
   return {
@@ -1320,18 +1353,19 @@ function normalizeSolanaTx(tx, sig, owner) {
   };
 }
 
-async function quoteJupiter(balance) {
+export async function quoteJupiter(balance) {
   const url =
     `${env('JUPITER_QUOTE_URL', 'https://lite-api.jup.ag/swap/v1/quote')}` +
     `?inputMint=${balance.asset}&outputMint=${SOLANA.usdc}` +
     `&amount=${balance.amount.toString()}&slippageBps=50`;
   try {
     const res = await fetch(url, deadline());
-    if (!res.ok) return null;
+    if (!res.ok) return { quoted: false, reason: 'refused' };
     const json = await res.json();
-    if (!json.outAmount) return null;
+    if (!json.outAmount) return { quoted: false, reason: 'no-route' };
     const realizableUsd = Number(json.outAmount) / 1e6;
     return {
+      quoted: true,
       asset: balance.asset,
       symbol: balance.symbol,
       nominalUsd: balance.valueUsd,
@@ -1340,7 +1374,7 @@ async function quoteJupiter(balance) {
       liquidityRatio: balance.valueUsd > 0 ? realizableUsd / balance.valueUsd : 0,
     };
   } catch {
-    return null;
+    return { quoted: false, reason: 'refused' };
   }
 }
 
@@ -1351,7 +1385,7 @@ async function quoteJupiter(balance) {
  * stablecoin or native leg. See references/methodology.md for why this beats
  * fetching a historical price per token per day, and where it falls short.
  */
-function computePositions(result, nativePriceByDay) {
+export function computePositions(result, nativePriceByDay) {
   const stables = result.cfg.stables ?? {};
   const isStable = (a) => a?.toLowerCase() in stables || a in stables;
   const positions = new Map();
@@ -1508,7 +1542,7 @@ function summarize(result) {
 }
 
 /** Rank the expensive mistakes. Strictly by dollar cost, across categories. */
-function collectRegrets(chain) {
+export function collectRegrets(chain) {
   const out = [];
 
   const worst = chain.positions.filter((p) => p.realizedPnlUsd < -50).sort((a, b) => a.realizedPnlUsd - b.realizedPnlUsd)[0];
@@ -1553,7 +1587,10 @@ function collectRegrets(chain) {
   }
 
   for (const l of chain.liquidity) {
-    if (l.liquidityRatio >= 0.9 || (l.nominalUsd ?? 0) < 100) continue;
+    // An unanswered quote is not evidence of a loss, so it is never ranked as
+    // one. It still shows in the liquidity table with its reason attached.
+    if (l.quoted === false && l.liquidityRatio === undefined) continue;
+    if ((l.liquidityRatio ?? 1) >= 0.9 || (l.nominalUsd ?? 0) < 100) continue;
     out.push({
       kind: 'illiquid-bag',
       title: `Illiquid position: ${l.symbol ?? short(l.asset)}`,
@@ -1583,7 +1620,7 @@ const short = (s) => (s && s.length > 14 ? `${s.slice(0, 6)}…${s.slice(-4)}` :
  * long; left unwrapped they blow past any sane terminal and make the report
  * unreadable in exactly the moment something has gone wrong.
  */
-function wrap(text, indent, width = 74) {
+export function wrap(text, indent, width = 74) {
   const pad = ' '.repeat(indent);
   const lines = [];
   let line = '';
@@ -1755,7 +1792,13 @@ async function main() {
   }
 
   const sum = (fn) => chainReports.reduce((a, c) => a + (fn(c) || 0), 0);
-  const quoted = (c) => new Map(c.liquidity.map((l) => [l.asset, l.realizableUsd]));
+  // Only positions with an actual quote contribute a realizable figure.
+  const quoted = (c) =>
+    new Map(
+      c.liquidity
+        .filter((l) => l.realizableUsd !== undefined)
+        .map((l) => [l.asset, l.realizableUsd]),
+    );
 
   const report = {
     generatedAt: new Date().toISOString(),
@@ -1768,6 +1811,8 @@ async function main() {
       portfolioNominalUsd: sum((c) => c.balances.reduce((a, b) => a + (b.valueUsd ?? 0), 0)),
       portfolioRealizableUsd: sum((c) => {
         const q = quoted(c);
+        // Where a quote could not be obtained, fall back to nominal rather than
+        // booking the position at zero.
         return c.balances.reduce((a, b) => a + (q.get(b.asset) ?? b.valueUsd ?? 0), 0);
       }),
     },
@@ -1786,7 +1831,11 @@ function die(msg) {
   process.exit(1);
 }
 
-main().catch((e) => {
-  process.stderr.write(`\nunexpected error: ${e?.stack ?? e}\n`);
-  process.exit(1);
-});
+// Run the CLI only when this file is executed directly, so tests can import
+// the pure functions above without the whole program firing.
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch((e) => {
+    process.stderr.write(`\nunexpected error: ${e?.stack ?? e}\n`);
+    process.exit(1);
+  });
+}

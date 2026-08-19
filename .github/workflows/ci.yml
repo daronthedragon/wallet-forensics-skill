@@ -18,6 +18,9 @@ jobs:
       - name: Syntax check the analyzer
         run: node --check scripts/forensics.mjs
 
+      - name: Tests
+        run: node --test test/*.test.mjs
+
       # The whole point of this skill is that it runs with no install step.
       # Fail loudly if a dependency ever sneaks in.
       - name: Assert zero dependencies
@@ -26,7 +29,9 @@ jobs:
             echo "package.json present — this skill is meant to be dependency-free"
             exit 1
           fi
-          if grep -rEn "^\s*(import|const .*=\s*require)\s*.*(from\s+)?['\"][^./]" scripts/*.mjs; then
+          # A bare specifier that is not a node: builtin is a dependency.
+          # Two greps rather than a PCRE lookahead, so this runs anywhere.
+          if grep -rEn "^[[:space:]]*import .*from ['\"][^./]" scripts/*.mjs                | grep -v "from ['\"]node:"; then
             echo "external module import found in scripts/"
             exit 1
           fi
