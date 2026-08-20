@@ -37,8 +37,8 @@ _Those two figures are illustrative — they show what the gap looks like, not a
 No API keys, no install, public infrastructure throttling everything it can:
 
 <p align="center">
-  <img src="assets/keyless-run.svg" width="720"
-       alt="Terminal showing the skill analyzing an address on Base: a $5,998 nominal portfolio, zero PnL and fees, and two notes explaining that Blockscout returned 429 on token transfers and that the approval scan was degraded because the RPC refused an unbounded log query.">
+  <img src="assets/demo.gif" width="760"
+       alt="Animated terminal recording: the skill analyzes an address on Base and prints a $5,998 nominal portfolio, zero PnL and fees, then two notes explaining that Blockscout returned 429 on token transfers and that the approval scan was degraded because the RPC refused an unbounded log query.">
 </p>
 
 <details>
