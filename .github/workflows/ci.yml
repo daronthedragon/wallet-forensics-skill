@@ -19,6 +19,7 @@ jobs:
         run: |
           node --check scripts/forensics.mjs
           node --check core/analysis.mjs
+          node --check mcp/server.mjs
 
       - name: Tests
         run: node --test test/*.test.mjs
@@ -33,11 +34,21 @@ jobs:
           fi
           # A bare specifier that is not a node: builtin is a dependency.
           # Two greps rather than a PCRE lookahead, so this runs anywhere.
-          if grep -rEn "^[[:space:]]*import .*from ['\"][^./]" scripts/*.mjs                | grep -v "from ['\"]node:"; then
+          if grep -rEn "^[[:space:]]*import .*from ['\"][^./]" scripts/*.mjs core/*.mjs mcp/*.mjs                | grep -v "from ['\"]node:"; then
             echo "external module import found in scripts/"
             exit 1
           fi
           echo "no external imports"
+
+      - name: MCP protocol contract
+        run: |
+          out=$(printf '%s
+%s
+'             '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}'             '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'             | node mcp/server.mjs)
+          echo "$out" | head -2
+          echo "$out" | grep -q '"serverInfo"' || { echo "no serverInfo in initialize result"; exit 1; }
+          echo "$out" | grep -q '"analyze_wallet"' || { echo "tool not advertised"; exit 1; }
+          echo "MCP handshake and tools/list OK"
 
       - name: CLI contract
         run: |

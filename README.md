@@ -2,7 +2,9 @@
 
 [![CI](https://github.com/daronthedragon/wallet-forensics-skill/actions/workflows/ci.yml/badge.svg)](https://github.com/daronthedragon/wallet-forensics-skill/actions/workflows/ci.yml)
 
-An agent skill for forensic analysis of blockchain wallets. Give an agent an address, get back what it actually holds, what it lost, and what still puts it at risk.
+Forensic wallet analysis for **any** coding agent. Give it an address, get back what the wallet actually holds, what it lost, and what still puts it at risk.
+
+Works as an **MCP server**, a **CLI**, or a **Claude skill** — same analyzer behind all three.
 
 Works on **Ethereum, Base, Arbitrum, Optimism, Polygon, and Solana**. Zero dependencies and no API keys required — Node 20+ and nothing else.
 
@@ -69,13 +71,43 @@ Every zero carries the reason it is a zero. The report never says "no risky appr
 
 ## Install
 
-Drop the folder into your agent's skills directory:
+```bash
+git clone https://github.com/daronthedragon/wallet-forensics-skill
+```
+
+Node 20+. No build, no `npm install`, no API key. Then wire it up whichever way
+your agent works.
+
+### Any MCP client — Cursor, Windsurf, Zed, Continue, VS Code
+
+```json
+{
+  "mcpServers": {
+    "wallet-forensics": {
+      "command": "node",
+      "args": ["/absolute/path/to/wallet-forensics-skill/mcp/server.mjs"]
+    }
+  }
+}
+```
+
+Exposes one tool, `analyze_wallet`. The MCP server is implemented directly
+against the protocol rather than with the official SDK, because the SDK is a
+dependency and this repo has none.
+
+### Claude Code / Claude Desktop
 
 ```bash
 git clone https://github.com/daronthedragon/wallet-forensics-skill ~/.claude/skills/wallet-forensics
 ```
 
-The agent picks it up from `SKILL.md`. No build, no `npm install`.
+Picked up from `SKILL.md`. The MCP config above also works if you prefer it.
+
+### Any agent that can run a shell command
+
+Point it at [`AGENTS.md`](AGENTS.md) and let it call the CLI directly. That
+file is the vendor-neutral version of `SKILL.md` — same instructions, no
+Claude-specific framing.
 
 ## Use it directly
 
@@ -133,8 +165,11 @@ Everything has a working public default. Two variables meaningfully improve resu
 ## Layout
 
 ```
-SKILL.md                              trigger description + agent instructions
-scripts/forensics.mjs                 the analyzer — zero dependencies
+SKILL.md                              Claude skill format
+AGENTS.md                             the same instructions, vendor-neutral
+mcp/server.mjs                        MCP server — one tool, zero dependencies
+scripts/forensics.mjs                 the analyzer, also usable as a plain CLI
+core/                                 shared analysis, caching and pricing
 references/methodology.md             how each number is produced, and where it breaks
 references/interpreting-results.md    turning a report into a useful explanation
 ```
