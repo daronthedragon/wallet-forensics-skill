@@ -42,12 +42,13 @@ jobs:
 
       - name: MCP protocol contract
         run: |
-          out=$(printf '%s
-%s
-'             '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}'             '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'             | node mcp/server.mjs)
-          echo "$out" | head -2
-          echo "$out" | grep -q '"serverInfo"' || { echo "no serverInfo in initialize result"; exit 1; }
-          echo "$out" | grep -q '"analyze_wallet"' || { echo "tool not advertised"; exit 1; }
+          {
+            echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}' 
+            echo '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' 
+          } | node mcp/server.mjs > mcp-out.txt
+          cat mcp-out.txt
+          grep -q '"serverInfo"' mcp-out.txt || { echo "no serverInfo in initialize result"; exit 1; }
+          grep -q '"analyze_wallet"' mcp-out.txt || { echo "tool not advertised"; exit 1; }
           echo "MCP handshake and tools/list OK"
 
       - name: CLI contract
