@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test, describe } from 'node:test';
 
 import {
+  approvalTargetsFromHistory,
   collectRegrets,
   computePositions,
   estimateMevProfit,
@@ -282,5 +283,59 @@ describe('chain table', () => {
         assert.equal(addr, addr.toLowerCase(), `${key}: ${addr}`);
       }
     }
+  });
+});
+
+/* ─────────────────────────────────────────────── approval decoding */
+
+describe('approval targets from history', () => {
+  const USDC_T = '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48';
+  const SPENDER = '0x1111111254eeb25477b68fb85ed929f73a960582';
+  const approve = (spender) =>
+    '0x095ea7b3' + '0'.repeat(24) + spender.replace(/^0x/, '') + 'f'.repeat(64);
+
+  test('recovers the spender from approve() calldata', () => {
+    const pairs = approvalTargetsFromHistory([
+      { outgoing: true, failed: false, to: USDC_T, input: approve(SPENDER) },
+    ]);
+    assert.equal(pairs.length, 1);
+    assert.equal(pairs[0].token, USDC_T.toLowerCase());
+    assert.equal(pairs[0].spender, SPENDER.toLowerCase());
+  });
+
+  test('also handles increaseAllowance', () => {
+    const input = '0x39509351' + '0'.repeat(24) + SPENDER.slice(2) + '1'.repeat(64);
+    const pairs = approvalTargetsFromHistory([
+      { outgoing: true, failed: false, to: USDC_T, input },
+    ]);
+    assert.equal(pairs.length, 1);
+  });
+
+  test('ignores transactions that cannot have granted an approval', () => {
+    const pairs = approvalTargetsFromHistory([
+      // inbound: the owner did not send it
+      { outgoing: false, failed: false, to: USDC_T, input: approve(SPENDER) },
+      // reverted: no allowance was set
+      { outgoing: true, failed: true, to: USDC_T, input: approve(SPENDER) },
+      // a transfer, not an approval
+      { outgoing: true, failed: false, to: USDC_T, input: '0xa9059cbb' + '0'.repeat(128) },
+      // truncated calldata
+      { outgoing: true, failed: false, to: USDC_T, input: '0x095ea7b3' },
+      // no destination
+      { outgoing: true, failed: false, input: approve(SPENDER) },
+    ]);
+    assert.deepEqual(pairs, []);
+  });
+
+  test('approving the zero address is a revoke, not a grant', () => {
+    const pairs = approvalTargetsFromHistory([
+      { outgoing: true, failed: false, to: USDC_T, input: approve('0x' + '0'.repeat(40)) },
+    ]);
+    assert.deepEqual(pairs, []);
+  });
+
+  test('the same pair granted twice is reported once', () => {
+    const tx = { outgoing: true, failed: false, to: USDC_T, input: approve(SPENDER) };
+    assert.equal(approvalTargetsFromHistory([tx, tx, tx]).length, 1);
   });
 });

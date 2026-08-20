@@ -17,6 +17,7 @@
 import { pathToFileURL } from 'node:url';
 
 import {
+  approvalTargetsFromHistory,
   collectRegrets,
   computePositions,
   estimateMevProfit,
@@ -917,14 +918,9 @@ async function collectApprovals(url, address, txs) {
     // Fall through to the history-derived path.
   }
 
-  for (const tx of txs) {
-    if (!tx.outgoing || tx.failed || !tx.input || !tx.to) continue;
-    const sel = tx.input.slice(0, 10).toLowerCase();
-    if (sel !== SEL.approve && sel !== SEL.increaseAllowance) continue;
-    if (tx.input.length < 74) continue;
-    const token = tx.to.toLowerCase();
-    const spender = `0x${tx.input.slice(34, 74)}`.toLowerCase();
-    found.set(`${token}:${spender}`, { token, spender });
+  // Same decoding as the TypeScript implementation, from the shared core.
+  for (const p of approvalTargetsFromHistory(txs)) {
+    found.set(`${p.token}:${p.spender}`, p);
   }
   return { pairs: [...found.values()], degraded: true };
 }
